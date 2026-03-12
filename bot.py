@@ -15,7 +15,6 @@ SHEET_URL = os.environ.get("SHEET_URL", "").strip()
 LOCAL_CSV_FILE = "products.csv"
 MAX_RESULTS = 10
 
-
 # =========================
 # LOAD DATA
 # =========================
@@ -44,7 +43,6 @@ def load_data() -> pd.DataFrame:
         print("Error loading data:", e)
         raise
 
-
 # =========================
 # HELPERS
 # =========================
@@ -72,6 +70,7 @@ def build_caption(row) -> str:
     perfume_name = safe_str(row.get("perfume_name", ""))
     inspiration = safe_str(row.get("inspiration", ""))
     gender = safe_str(row.get("gender", ""))
+    ml = safe_str(row.get("ml", ""))
 
     top = safe_str(row.get("top", ""))
     middle = safe_str(row.get("middle", ""))
@@ -87,6 +86,8 @@ def build_caption(row) -> str:
         parts.append(f"Inspiration: {inspiration}")
     if gender:
         parts.append(f"Gender: {gender}")
+    if ml:
+        parts.append(f"Size: {ml}")
     if top:
         parts.append(f"Top: {top}")
     if middle:
@@ -113,6 +114,7 @@ def search_perfumes(user_text: str, df: pd.DataFrame):
         middle = normalize_text(row.get("middle", ""))
         base = normalize_text(row.get("base", ""))
         gender = normalize_text(row.get("gender", ""))
+        ml = normalize_text(row.get("ml", ""))
 
         searchable_text = " ".join([
             perfume_name,
@@ -121,23 +123,22 @@ def search_perfumes(user_text: str, df: pd.DataFrame):
             top,
             middle,
             base,
-            gender
+            gender,
+            ml
         ]).strip()
 
-        # exact perfume name match
+        # Exact perfume name match
         if query == perfume_name:
             exact_matches.append(row)
             continue
 
-        # partial search
+        # Partial search
         if query in searchable_text:
             partial_matches.append(row)
 
-    # if exact perfume name found, return only exact result
     if exact_matches:
         return exact_matches[:MAX_RESULTS]
 
-    # otherwise return all partial matches, e.g. "bohemio"
     seen = set()
     unique_rows = []
 
@@ -149,7 +150,6 @@ def search_perfumes(user_text: str, df: pd.DataFrame):
 
     return unique_rows[:MAX_RESULTS]
 
-
 # =========================
 # TELEGRAM HANDLER
 # =========================
@@ -159,7 +159,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     user_text = update.message.text.strip()
 
-    # Reload sheet every message so latest sheet updates are used
+    # Reload Google Sheet every message
     df = load_data()
     results = search_perfumes(user_text, df)
 
@@ -185,7 +185,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not sent_photo:
             await update.message.reply_text(caption)
 
-
 # =========================
 # HEALTH CHECK SERVER
 # =========================
@@ -206,7 +205,6 @@ def run_web_server():
     print(f"Health server running on port {port}")
     server.serve_forever()
 
-
 # =========================
 # MAIN
 # =========================
@@ -219,7 +217,6 @@ def main():
 
     print("Bot is running...")
     app.run_polling(drop_pending_updates=True)
-
 
 if __name__ == "__main__":
     threading.Thread(target=run_web_server, daemon=True).start()
