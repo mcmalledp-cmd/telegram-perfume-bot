@@ -45,6 +45,9 @@ def load_data() -> pd.DataFrame:
         raise
 
 
+# =========================
+# HELPERS
+# =========================
 def safe_str(value) -> str:
     return str(value).strip() if value is not None else ""
 
@@ -69,7 +72,10 @@ def build_caption(row) -> str:
     perfume_name = safe_str(row.get("perfume_name", ""))
     inspiration = safe_str(row.get("inspiration", ""))
     gender = safe_str(row.get("gender", ""))
-    smell_note = safe_str(row.get("smell_note", ""))
+
+    top = safe_str(row.get("top", ""))
+    middle = safe_str(row.get("middle", ""))
+    base = safe_str(row.get("base", ""))
 
     parts = []
 
@@ -81,8 +87,12 @@ def build_caption(row) -> str:
         parts.append(f"Inspiration: {inspiration}")
     if gender:
         parts.append(f"Gender: {gender}")
-    if smell_note:
-        parts.append(f"Notes: {smell_note}")
+    if top:
+        parts.append(f"Top: {top}")
+    if middle:
+        parts.append(f"Middle: {middle}")
+    if base:
+        parts.append(f"Base: {base}")
 
     return "\n".join(parts)
 
@@ -99,25 +109,35 @@ def search_perfumes(user_text: str, df: pd.DataFrame):
         perfume_name = normalize_text(row.get("perfume_name", ""))
         brand = normalize_text(row.get("brand", ""))
         inspiration = normalize_text(row.get("inspiration", ""))
-        smell_note = normalize_text(row.get("smell_note", ""))
+        top = normalize_text(row.get("top", ""))
+        middle = normalize_text(row.get("middle", ""))
+        base = normalize_text(row.get("base", ""))
         gender = normalize_text(row.get("gender", ""))
 
-        searchable_text = " ".join([perfume_name, brand, inspiration, smell_note, gender]).strip()
+        searchable_text = " ".join([
+            perfume_name,
+            brand,
+            inspiration,
+            top,
+            middle,
+            base,
+            gender
+        ]).strip()
 
-        # Exact full perfume name match
+        # exact perfume name match
         if query == perfume_name:
             exact_matches.append(row)
             continue
 
-        # Partial search
+        # partial search
         if query in searchable_text:
             partial_matches.append(row)
 
-    # If exact perfume name found, return only that/those
+    # if exact perfume name found, return only exact result
     if exact_matches:
         return exact_matches[:MAX_RESULTS]
 
-    # Otherwise return partial matches like "bohemio" -> all bohemio perfumes
+    # otherwise return all partial matches, e.g. "bohemio"
     seen = set()
     unique_rows = []
 
@@ -139,7 +159,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     user_text = update.message.text.strip()
 
-    # Reload sheet every message so new sheet updates appear automatically
+    # Reload sheet every message so latest sheet updates are used
     df = load_data()
     results = search_perfumes(user_text, df)
 
