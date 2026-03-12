@@ -9,11 +9,8 @@ from telegram.ext import Application, MessageHandler, ContextTypes, filters
 # =========================
 # SETTINGS
 # =========================
-BOT_TOKEN = os.environ.get("8734784511:AAGdQVoyjnu3WdqoQ2F5GbVIsRSPyuIOvEc", "").strip()
-
-# Put your published Google Sheet CSV link in Render env variable:
-# SHEET_URL = https://docs.google.com/spreadsheets/d/XXXXX/export?format=csv
-SHEET_URL = os.environ.get("https://docs.google.com/spreadsheets/d/e/2PACX-1vRPB1vYtc3E1FXutjbrEt3IDDe_RjWrBHN7All7-DglF2YHsNmkWE2UDXV-oV6JW-y_gK-I3DaS30X1/pub?output=csv", "").strip()
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip()
+SHEET_URL = os.environ.get("SHEET_URL", "").strip()
 
 # Optional fallback for local testing
 LOCAL_CSV_FILE = "products.csv"
@@ -26,10 +23,6 @@ MAX_RESULTS = 10
 # LOAD DATA
 # =========================
 def load_data() -> pd.DataFrame:
-    """
-    Load perfume data from Google Sheet CSV URL.
-    Falls back to local CSV file if SHEET_URL is missing.
-    """
     try:
         if SHEET_URL:
             df = pd.read_csv(SHEET_URL)
@@ -39,8 +32,6 @@ def load_data() -> pd.DataFrame:
             print("Loaded data from local CSV.")
 
         df = df.fillna("")
-
-        # Normalize column names
         df.columns = [str(col).strip().lower() for col in df.columns]
 
         print("CSV columns found:", list(df.columns))
@@ -72,13 +63,6 @@ def normalize_text(text: str) -> str:
 
 
 def split_photo_urls(photo_value: str):
-    """
-    Supports one or multiple image URLs.
-    You can separate multiple URLs in the sheet by:
-    comma ,
-    or pipe |
-    or semicolon ;
-    """
     raw = safe_str(photo_value)
     if not raw:
         return []
@@ -86,8 +70,7 @@ def split_photo_urls(photo_value: str):
     for sep in ["|", ";"]:
         raw = raw.replace(sep, ",")
 
-    urls = [x.strip() for x in raw.split(",") if x.strip()]
-    return urls
+    return [x.strip() for x in raw.split(",") if x.strip()]
 
 
 def build_caption(row) -> str:
@@ -114,35 +97,26 @@ def build_caption(row) -> str:
 
 
 def row_exact_score(query: str, row) -> int:
-    """
-    Higher score = better match
-    """
     perfume_name = normalize_text(row.get("perfume_name", ""))
     brand = normalize_text(row.get("brand", ""))
     keywords = normalize_text(row.get("keywords", ""))
 
     score = 0
 
-    # Exact perfume name
     if query == perfume_name:
         score += 100
-
-    # Exact brand
     if query == brand:
         score += 60
 
-    # Exact keyword token
     keyword_list = [k.strip() for k in keywords.replace(";", ",").replace("|", ",").split(",")]
     if query in keyword_list:
         score += 50
 
-    # Startswith
     if perfume_name.startswith(query):
         score += 35
     if brand.startswith(query):
         score += 20
 
-    # Contains
     if query in perfume_name:
         score += 25
     if query in brand:
@@ -173,10 +147,8 @@ def search_perfumes(user_text: str):
             score = row_exact_score(query, row)
             matches.append((score, row))
 
-    # Sort best matches first
     matches.sort(key=lambda x: x[0], reverse=True)
 
-    # Remove duplicates by perfume_name
     seen = set()
     unique_rows = []
 
@@ -207,11 +179,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         caption = build_caption(row)
         photo_urls = split_photo_urls(row.get("photo_url", ""))
 
-        # Send up to 3 photos if available
         sent_photo = False
         for photo_url in photo_urls[:3]:
             try:
-                await update.message.reply_photo(photo=photo_url, caption=caption if not sent_photo else "")
+                await update.message.reply_photo(
+                    photo=photo_url,
+                    caption=caption if not sent_photo else ""
+                )
                 sent_photo = True
             except Exception as e:
                 print(f"Failed to send photo {photo_url}: {e}")
