@@ -1,10 +1,18 @@
 import os
 import threading
+import logging
+import re
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pandas as pd
 from telegram import Update
-from telegram.ext import Application, MessageHandler, ContextTypes, filters
+from telegram.ext import (
+    Application,
+    MessageHandler,
+    CommandHandler,
+    ContextTypes,
+    filters,
+)
 
 # =========================
 # SETTINGS
@@ -15,6 +23,12 @@ SHEET_URL = os.environ.get("SHEET_URL", "").strip()
 LOCAL_CSV_FILE = "products.csv"
 MAX_RESULTS = 10
 
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO,
+)
+logger = logging.getLogger(__name__)
+
 # =========================
 # LOAD DATA
 # =========================
@@ -22,15 +36,15 @@ def load_data() -> pd.DataFrame:
     try:
         if SHEET_URL:
             df = pd.read_csv(SHEET_URL)
-            print("Loaded data from Google Sheet.")
+            logger.info("Loaded data from Google Sheet.")
         else:
             df = pd.read_csv(LOCAL_CSV_FILE)
-            print("Loaded data from local CSV.")
+            logger.info("Loaded data from local CSV.")
 
         df = df.fillna("")
         df.columns = [str(col).strip().lower() for col in df.columns]
 
-        print("CSV columns found:", list(df.columns))
+        logger.info("CSV columns found: %s", list(df.columns))
 
         required_columns = ["brand", "perfume_name"]
         for col in required_columns:
@@ -40,7 +54,7 @@ def load_data() -> pd.DataFrame:
         return df
 
     except Exception as e:
-        print("Error loading data:", e)
+        logger.exception("Error loading data: %s", e)
         raise
 
 # =========================
@@ -49,10 +63,27 @@ def load_data() -> pd.DataFrame:
 def safe_str(value) -> str:
     return str(value).strip() if value is not None else ""
 
-
 def normalize_text(text: str) -> str:
     return safe_str(text).lower()
 
+def convert_google_drive_url(url: str) -> str:
+    """
+    Convert Google Drive share/view links into direct-view links usable by Telegram.
+    """
+    url = safe_str(url)
+
+    patterns = [
+        r"drive\.google\.com/file/d/([^/]+)/",
+        r"id=([^&]+)"
+    ]
+
+    for pattern in patterns:
+        match = re.search(pattern, url)
+        if match:
+            file_id = match.group(1)
+            return f"https://drive.google.com/uc?export=view&id={file_id}"
+
+    return url
 
 def split_photo_urls(photo_value: str):
     raw = safe_str(photo_value)
@@ -62,8 +93,8 @@ def split_photo_urls(photo_value: str):
     for sep in ["|", ";"]:
         raw = raw.replace(sep, ",")
 
-    return [x.strip() for x in raw.split(",") if x.strip()]
-
+    urls = [x.strip() for x in raw.split(",") if x.strip()]
+    return [convert_google_drive_url(x) for x in urls]
 
 def build_caption(row) -> str:
     brand = safe_str(row.get("brand", ""))
@@ -87,7 +118,7 @@ def build_caption(row) -> str:
     if gender:
         parts.append(f"Gender: {gender}")
     if ml:
-        parts.append(f"Size: {ml}")
+        parts.append(f"Size: {ml} ml")
     if top:
         parts.append(f"Top: {top}")
     if middle:
@@ -96,7 +127,6 @@ def build_caption(row) -> str:
         parts.append(f"Base: {base}")
 
     return "\n".join(parts)
-
 
 def search_perfumes(user_text: str, df: pd.DataFrame):
     query = normalize_text(user_text)
@@ -127,12 +157,10 @@ def search_perfumes(user_text: str, df: pd.DataFrame):
             ml
         ]).strip()
 
-        # Exact perfume name match
         if query == perfume_name:
             exact_matches.append(row)
             continue
 
-        # Partial search
         if query in searchable_text:
             partial_matches.append(row)
 
@@ -151,39 +179,54 @@ def search_perfumes(user_text: str, df: pd.DataFrame):
     return unique_rows[:MAX_RESULTS]
 
 # =========================
-# TELEGRAM HANDLER
+# TELEGRAM HANDLERS
 # =========================
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "Welcome to Mamlakat Product Bot.\n"
+        "Type any perfume name to search.\n\n"
+        "Example:\n"
+        "Bohemio\n"
+        "or\n"
+        "Bohemio Cherry Rosé Elixir"
+    )
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text:
         return
 
     user_text = update.message.text.strip()
+    logger.info("Received message: %s", user_text)
 
-    # Reload Google Sheet every message
-    df = load_data()
-    results = search_perfumes(user_text, df)
+    try:
+        df = load_data()
+        results = search_perfumes(user_text, df)
 
-    if not results:
-        await update.message.reply_text("Not found")
-        return
+        if not results:
+            await update.message.reply_text("Product not found.")
+            return
 
-    for row in results:
-        caption = build_caption(row)
-        photo_urls = split_photo_urls(row.get("photo_url", ""))
+        for row in results:
+            caption = build_caption(row)
+            photo_urls = split_photo_urls(row.get("photo_url", ""))
 
-        sent_photo = False
-        for photo_url in photo_urls[:3]:
-            try:
-                await update.message.reply_photo(
-                    photo=photo_url,
-                    caption=caption if not sent_photo else ""
-                )
-                sent_photo = True
-            except Exception as e:
-                print(f"Failed to send photo {photo_url}: {e}")
+            sent_photo = False
+            for photo_url in photo_urls[:3]:
+                try:
+                    await update.message.reply_photo(
+                        photo=photo_url,
+                        caption=caption if not sent_photo else ""
+                    )
+                    sent_photo = True
+                except Exception as e:
+                    logger.warning("Failed to send photo %s: %s", photo_url, e)
 
-        if not sent_photo:
-            await update.message.reply_text(caption)
+            if not sent_photo:
+                await update.message.reply_text(caption)
+
+    except Exception as e:
+        logger.exception("Error while handling message: %s", e)
+        await update.message.reply_text("There was an error reading the product database.")
 
 # =========================
 # HEALTH CHECK SERVER
@@ -198,11 +241,10 @@ class HealthHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         return
 
-
 def run_web_server():
     port = int(os.environ.get("PORT", 10000))
     server = HTTPServer(("0.0.0.0", port), HealthHandler)
-    print(f"Health server running on port {port}")
+    logger.info("Health server running on port %s", port)
     server.serve_forever()
 
 # =========================
@@ -213,9 +255,11 @@ def main():
         raise ValueError("BOT_TOKEN is missing. Add it in Render environment variables.")
 
     app = Application.builder().token(BOT_TOKEN).build()
+
+    app.add_handler(CommandHandler("start", start_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    print("Bot is running...")
+    logger.info("Bot is running...")
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
