@@ -12,10 +12,7 @@ from telegram.ext import Application, MessageHandler, ContextTypes, filters
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip()
 SHEET_URL = os.environ.get("SHEET_URL", "").strip()
 
-# Optional fallback for local testing
 LOCAL_CSV_FILE = "products.csv"
-
-# Max number of matching products to send
 MAX_RESULTS = 10
 
 
@@ -48,12 +45,6 @@ def load_data() -> pd.DataFrame:
         raise
 
 
-df = load_data()
-
-
-# =========================
-# HELPERS
-# =========================
 def safe_str(value) -> str:
     return str(value).strip() if value is not None else ""
 
@@ -76,9 +67,9 @@ def split_photo_urls(photo_value: str):
 def build_caption(row) -> str:
     brand = safe_str(row.get("brand", ""))
     perfume_name = safe_str(row.get("perfume_name", ""))
+    inspiration = safe_str(row.get("inspiration", ""))
     gender = safe_str(row.get("gender", ""))
     smell_note = safe_str(row.get("smell_note", ""))
-    keywords = safe_str(row.get("keywords", ""))
 
     parts = []
 
@@ -86,73 +77,51 @@ def build_caption(row) -> str:
         parts.append(f"Brand: {brand}")
     if perfume_name:
         parts.append(f"Perfume: {perfume_name}")
+    if inspiration:
+        parts.append(f"Inspiration: {inspiration}")
     if gender:
         parts.append(f"Gender: {gender}")
     if smell_note:
         parts.append(f"Notes: {smell_note}")
-    if keywords:
-        parts.append(f"Keywords: {keywords}")
 
     return "\n".join(parts)
 
 
-def row_exact_score(query: str, row) -> int:
-    perfume_name = normalize_text(row.get("perfume_name", ""))
-    brand = normalize_text(row.get("brand", ""))
-    keywords = normalize_text(row.get("keywords", ""))
-
-    score = 0
-
-    if query == perfume_name:
-        score += 100
-    if query == brand:
-        score += 60
-
-    keyword_list = [k.strip() for k in keywords.replace(";", ",").replace("|", ",").split(",")]
-    if query in keyword_list:
-        score += 50
-
-    if perfume_name.startswith(query):
-        score += 35
-    if brand.startswith(query):
-        score += 20
-
-    if query in perfume_name:
-        score += 25
-    if query in brand:
-        score += 10
-    if query in keywords:
-        score += 15
-
-    return score
-
-
-def search_perfumes(user_text: str):
+def search_perfumes(user_text: str, df: pd.DataFrame):
     query = normalize_text(user_text)
     if not query:
         return []
 
-    matches = []
+    exact_matches = []
+    partial_matches = []
 
     for _, row in df.iterrows():
         perfume_name = normalize_text(row.get("perfume_name", ""))
         brand = normalize_text(row.get("brand", ""))
-        keywords = normalize_text(row.get("keywords", ""))
+        inspiration = normalize_text(row.get("inspiration", ""))
         smell_note = normalize_text(row.get("smell_note", ""))
         gender = normalize_text(row.get("gender", ""))
 
-        searchable_text = " ".join([perfume_name, brand, keywords, smell_note, gender]).strip()
+        searchable_text = " ".join([perfume_name, brand, inspiration, smell_note, gender]).strip()
 
+        # Exact full perfume name match
+        if query == perfume_name:
+            exact_matches.append(row)
+            continue
+
+        # Partial search
         if query in searchable_text:
-            score = row_exact_score(query, row)
-            matches.append((score, row))
+            partial_matches.append(row)
 
-    matches.sort(key=lambda x: x[0], reverse=True)
+    # If exact perfume name found, return only that/those
+    if exact_matches:
+        return exact_matches[:MAX_RESULTS]
 
+    # Otherwise return partial matches like "bohemio" -> all bohemio perfumes
     seen = set()
     unique_rows = []
 
-    for score, row in matches:
+    for row in partial_matches:
         perfume_name = normalize_text(row.get("perfume_name", ""))
         if perfume_name not in seen:
             seen.add(perfume_name)
@@ -169,7 +138,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     user_text = update.message.text.strip()
-    results = search_perfumes(user_text)
+
+    # Reload sheet every message so new sheet updates appear automatically
+    df = load_data()
+    results = search_perfumes(user_text, df)
 
     if not results:
         await update.message.reply_text("Not found")
