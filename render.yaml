@@ -1,18 +1,6 @@
 services:
-  - type: web
+  - type: worker
     name: telegram-perfume-bot
-    runtime: python
-    plan: free
-
+    env: python
     buildCommand: pip install -r requirements.txt
     startCommand: python bot.py
-
-    envVars:
-      - key: PYTHON_VERSION
-        value: 3.11
-
-      - key: BOT_TOKEN
-        sync: false
-
-      - key: SHEET_URL
-        sync: false
