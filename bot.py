@@ -15,15 +15,12 @@ from telegram.ext import (
     filters,
 )
 
-# =========================
-# SETTINGS
-# =========================
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip()
 SHEET_URL = os.environ.get("SHEET_URL", "").strip()
 
 LOCAL_CSV_FILE = "products.csv"
 MAX_RESULTS = 10
-CACHE_TTL_SECONDS = 300  # reload data every 5 minutes
+CACHE_SECONDS = 60
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -31,39 +28,63 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# =========================
-# GLOBAL CACHE
-# =========================
-PRODUCTS_DF = None
-LAST_LOAD_TIME = 0
+cached_df = None
+last_load_time = 0
 
 
-# =========================
-# HELPERS
-# =========================
+def load_data_from_source() -> pd.DataFrame:
+    if SHEET_URL:
+        df = pd.read_csv(SHEET_URL)
+        logger.info("Loaded data from Google Sheet.")
+    else:
+        df = pd.read_csv(LOCAL_CSV_FILE)
+        logger.info("Loaded data from local CSV.")
+
+    df = df.fillna("")
+    df.columns = [str(col).strip().lower() for col in df.columns]
+
+    logger.info("CSV columns found: %s", list(df.columns))
+
+    required_columns = ["brand", "perfume_name"]
+    for col in required_columns:
+        if col not in df.columns:
+            raise ValueError(f"Missing required column: {col}")
+
+    return df
+
+
+def get_data() -> pd.DataFrame:
+    global cached_df, last_load_time
+
+    now = time.time()
+
+    if cached_df is None or (now - last_load_time) > CACHE_SECONDS:
+        try:
+            cached_df = load_data_from_source()
+            last_load_time = now
+            logger.info("Data cache refreshed.")
+        except Exception as e:
+            logger.exception("Failed to refresh data: %s", e)
+            if cached_df is None:
+                raise
+
+    return cached_df
+
+
 def safe_str(value) -> str:
     return str(value).strip() if value is not None else ""
 
 
 def normalize_text(text: str) -> str:
-    return " ".join(safe_str(text).lower().split())
+    return safe_str(text).lower()
 
 
 def convert_google_drive_url(url: str) -> str:
-    """
-    Convert Google Drive links to direct image links usable by Telegram.
-    Supports:
-    - https://drive.google.com/file/d/FILE_ID/view?...
-    - https://drive.google.com/open?id=FILE_ID
-    - https://drive.google.com/uc?id=FILE_ID
-    """
     url = safe_str(url)
-    if not url:
-        return ""
 
     patterns = [
-        r"drive\.google\.com/file/d/([^/]+)",
-        r"[?&]id=([^&]+)",
+        r"drive\.google\.com/file/d/([^/]+)/",
+        r"id=([^&]+)"
     ]
 
     for pattern in patterns:
@@ -80,18 +101,11 @@ def split_photo_urls(photo_value: str):
     if not raw:
         return []
 
-    for sep in ["|", ";", "\n"]:
+    for sep in ["|", ";"]:
         raw = raw.replace(sep, ",")
 
     urls = [x.strip() for x in raw.split(",") if x.strip()]
-    cleaned_urls = []
-
-    for url in urls:
-        converted = convert_google_drive_url(url)
-        if converted:
-            cleaned_urls.append(converted)
-
-    return cleaned_urls[:3]
+    return [convert_google_drive_url(x) for x in urls]
 
 
 def build_caption(row) -> str:
@@ -116,7 +130,7 @@ def build_caption(row) -> str:
     if gender:
         parts.append(f"Gender: {gender}")
     if ml:
-        parts.append(f"Size: {ml} ml")
+        parts.append(f"Size: {ml}")
     if top:
         parts.append(f"Top: {top}")
     if middle:
@@ -127,96 +141,49 @@ def build_caption(row) -> str:
     return "\n".join(parts)
 
 
-# =========================
-# LOAD DATA
-# =========================
-def load_data() -> pd.DataFrame:
-    try:
-        if SHEET_URL:
-            df = pd.read_csv(SHEET_URL)
-            logger.info("Loaded data from Google Sheet.")
-        else:
-            df = pd.read_csv(LOCAL_CSV_FILE)
-            logger.info("Loaded data from local CSV.")
-
-        df = df.fillna("")
-        df.columns = [str(col).strip().lower() for col in df.columns]
-
-        logger.info("CSV columns found: %s", list(df.columns))
-
-        required_columns = ["brand", "perfume_name"]
-        for col in required_columns:
-            if col not in df.columns:
-                raise ValueError(f"Missing required column: {col}")
-
-        return df
-
-    except Exception as e:
-        logger.exception("Error loading data: %s", e)
-        raise
-
-
-def get_data() -> pd.DataFrame:
-    global PRODUCTS_DF, LAST_LOAD_TIME
-
-    now = time.time()
-
-    if PRODUCTS_DF is None or (now - LAST_LOAD_TIME > CACHE_TTL_SECONDS):
-        PRODUCTS_DF = load_data()
-        LAST_LOAD_TIME = now
-        logger.info("Product data cache refreshed.")
-
-    return PRODUCTS_DF
-
-
-# =========================
-# SEARCH
-# =========================
 def search_perfumes(user_text: str, df: pd.DataFrame):
     query = normalize_text(user_text)
     if not query:
         return []
 
     exact_matches = []
-    name_startswith_matches = []
-    name_contains_matches = []
-    brand_matches = []
+    partial_matches = []
 
     for _, row in df.iterrows():
         perfume_name = normalize_text(row.get("perfume_name", ""))
         brand = normalize_text(row.get("brand", ""))
+        inspiration = normalize_text(row.get("inspiration", ""))
+        top = normalize_text(row.get("top", ""))
+        middle = normalize_text(row.get("middle", ""))
+        base = normalize_text(row.get("base", ""))
+        gender = normalize_text(row.get("gender", ""))
+        ml = normalize_text(row.get("ml", ""))
 
-        if not perfume_name:
-            continue
+        searchable_text = " ".join([
+            perfume_name,
+            brand,
+            inspiration,
+            top,
+            middle,
+            base,
+            gender,
+            ml
+        ]).strip()
 
-        # Exact full perfume name match -> highest priority
         if query == perfume_name:
             exact_matches.append(row)
             continue
 
-        # If query is at start of perfume name
-        if perfume_name.startswith(query):
-            name_startswith_matches.append(row)
-            continue
-
-        # If query appears anywhere in perfume name
-        if query in perfume_name:
-            name_contains_matches.append(row)
-            continue
-
-        # If query appears in brand name
-        if query in brand:
-            brand_matches.append(row)
+        if query in searchable_text:
+            partial_matches.append(row)
 
     if exact_matches:
         return exact_matches[:MAX_RESULTS]
 
-    combined = name_startswith_matches + name_contains_matches + brand_matches
-
     seen = set()
     unique_rows = []
 
-    for row in combined:
+    for row in partial_matches:
         perfume_name = normalize_text(row.get("perfume_name", ""))
         if perfume_name not in seen:
             seen.add(perfume_name)
@@ -225,19 +192,14 @@ def search_perfumes(user_text: str, df: pd.DataFrame):
     return unique_rows[:MAX_RESULTS]
 
 
-# =========================
-# TELEGRAM HANDLERS
-# =========================
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message:
-        return
-
     await update.message.reply_text(
         "Welcome to Mamlakat Product Bot.\n"
         "Type any perfume name to search.\n\n"
-        "Examples:\n"
-        "Bohemio\n"
-        "Bohemio Cherry Rosé Elixir"
+        "Example:\n"
+        "Palm Chill\n"
+        "or\n"
+        "Amber Sands Prestige"
     )
 
 
@@ -251,6 +213,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         df = get_data()
         results = search_perfumes(user_text, df)
+        logger.info("Found %s results", len(results))
 
         if not results:
             await update.message.reply_text("Product not found.")
@@ -261,8 +224,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             photo_urls = split_photo_urls(row.get("photo_url", ""))
 
             sent_photo = False
-
-            for photo_url in photo_urls:
+            for photo_url in photo_urls[:3]:
                 try:
                     await update.message.reply_photo(
                         photo=photo_url,
@@ -280,34 +242,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("There was an error reading the product database.")
 
 
-# =========================
-# OPTIONAL COMMAND TO REFRESH DATA
-# =========================
-async def reload_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global PRODUCTS_DF, LAST_LOAD_TIME
-
-    try:
-        PRODUCTS_DF = load_data()
-        LAST_LOAD_TIME = time.time()
-
-        if update.message:
-            await update.message.reply_text("Product database reloaded successfully.")
-
-    except Exception as e:
-        logger.exception("Reload failed: %s", e)
-        if update.message:
-            await update.message.reply_text("Failed to reload product database.")
-
-
-# =========================
-# HEALTH CHECK SERVER
-# =========================
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.send_header("Content-type", "text/plain")
         self.end_headers()
         self.wfile.write(b"Bot is running")
+
+    def do_HEAD(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/plain")
+        self.end_headers()
 
     def log_message(self, format, *args):
         return
@@ -320,20 +265,15 @@ def run_web_server():
     server.serve_forever()
 
 
-# =========================
-# MAIN
-# =========================
 def main():
     if not BOT_TOKEN:
         raise ValueError("BOT_TOKEN is missing. Add it in Render environment variables.")
 
-    # Load once at startup
     get_data()
 
     app = Application.builder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start_command))
-    app.add_handler(CommandHandler("reload", reload_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     logger.info("Bot is running...")
