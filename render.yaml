@@ -10,9 +10,3 @@ services:
     envVars:
       - key: PYTHON_VERSION
         value: 3.11
-
-      - key: BOT_TOKEN
-        sync: false
-
-      - key: SHEET_URL
-        sync: false
