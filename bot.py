@@ -194,17 +194,16 @@ def search_perfumes(user_text: str, df: pd.DataFrame):
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "Welcome to Mamlakat Product Bot. ✦\n"
+        "Welcome to Mamlakat Product Bot ✦\n"
         "(Volaré / Ard Al Khaleej / Sublime)\n\n"
-        "Type any perfume name or inspiration name to search.\n\n"
+        "Type any perfume name or inspiration fragrance to search.\n\n"
         "Examples:\n"
-        "Palm Chill\n"
-        "Cotton Abyed\n"
-        "Louis Vuitton On The Beach\n\n"
-        "If you search an inspiration, we will show you our matching perfume.\n"
-        "Example: Louis Vuitton On The Beach → SANTORINI BEACHES"
+        "• Palm Chill\n"
+        "• Cotton Abyed\n\n"
+        "If you search for an inspiration fragrance, we’ll show you the matching perfume from our collection.\n\n"
+        "Example:\n"
+        "Louis Vuitton On The Beach → SANTORINI BEACHES"
     )
-
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text:
