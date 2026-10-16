@@ -1,7 +1,3 @@
-This is your original code. **Replace everything in `bot.py` with the code below**, then click **Commit changes**.
-
-It adds **bold headings, Scent Family, and the correct Instagram link**. Inspiration remains searchable.
-
 ```python
 import os
 import threading
@@ -9,12 +5,10 @@ import logging
 import re
 import time
 import unicodedata
-
 from html import escape
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pandas as pd
-
 from telegram import Update
 from telegram.ext import (
     Application,
@@ -53,7 +47,6 @@ def load_data_from_source() -> pd.DataFrame:
 
     df = df.fillna("")
 
-    # Supports headers such as "Scent Family" and "scent_family".
     df.columns = [
         re.sub(r"\s+", "_", str(column).strip().lower())
         for column in df.columns
@@ -77,7 +70,6 @@ def get_data() -> pd.DataFrame:
         try:
             cached_df = load_data_from_source()
             last_load_time = now
-
             logger.info("Data cache refreshed.")
 
         except Exception:
@@ -117,11 +109,11 @@ def instagram_for_brand(brand: str):
 
     if any(
         name in brand
-        for name in [
+        for name in (
             "mamlakat",
             "ard al khaleej",
             "sublime",
-        ]
+        )
     ):
         return (
             "https://www.instagram.com/mamlakatofficial/",
@@ -184,12 +176,8 @@ def build_detail_blocks(row):
     blocks = []
 
     for label, column in fields:
-        value = safe_str(row.get(column, ""))
+        value = safe_str(row.get(column, "")) or "Not provided"
 
-        if not value:
-            value = "Not provided"
-
-        # Keep long values in independent, valid HTML blocks.
         for offset in range(0, len(value), 500):
             heading = (
                 label
@@ -381,8 +369,6 @@ async def handle_message(
                         exc_info=True,
                     )
 
-            # Send full details separately if the caption is long
-            # or if none of the photos could be sent.
             if not sent_photo or not short_caption:
                 await send_detail_text(
                     update.message,
@@ -488,5 +474,3 @@ if __name__ == "__main__":
 
     main()
 ```
-
-**Remember:** add the `scent_family` values to your connected Google Sheet or `products.csv`. Otherwise, the bot will display **“Scent Family: Not provided.”**
