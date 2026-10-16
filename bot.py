@@ -4,6 +4,7 @@ import logging
 import re
 import time
 import unicodedata
+import asyncio
 from html import escape
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -24,6 +25,7 @@ SHEET_URL = os.environ.get("SHEET_URL", "").strip()
 LOCAL_CSV_FILE = "products.csv"
 MAX_RESULTS = 10
 CACHE_SECONDS = 60
+CONTEXT_SECONDS = 1800
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -350,11 +352,267 @@ async def send_usage(message):
         reply_markup=ReplyKeyboardRemove(),
     )
 
+
+def faq_text(value):
+    """Normalize punctuation and accents for rule-based FAQ matching."""
+    return re.sub(r"[^\w\s]", " ", normalize_text(value)).strip()
+
+
+def tidy_phrase(value):
+    value = re.sub(r"\s+", " ", faq_text(value))
+    value = re.sub(r"\s+(?:please|from your collection|in your collection)$", "", value)
+    return value.strip()
+
+
+def faq_intent(text):
+    q = tidy_phrase(text)
+    if re.search(r"\b(?:payment|payments|pay|bank transfer|credit card|debit card|cards?|cash)\b", q):
+        return "payment"
+    if re.search(r"\b(?:in stock|stock|restock|available|availability|sold out|do you have (?:it|this|that))\b", q):
+        return "stock"
+    if re.search(r"\b(?:store|stores|showroom|showrooms|shop location|shops|try|test|sample in person|where are you located|where is your shop|where can i smell)\b", q):
+        return "stores"
+    if re.search(r"\b(?:order|ordering|buy|purchase|checkout|shop online|websites?|place an order)\b", q):
+        return "order"
+    if re.search(r"\b(?:scent famil(?:y|ies)|fragrance famil(?:y|ies)|olfactive famil(?:y|ies))\b", q):
+        if re.search(r"\b(?:mean|means|meaning|explain|definition)\b", q):
+            return "family_definition"
+        if re.search(r"\b(?:of|for|this|that|its|it s)\b", q):
+            return "family"
+        return "family_definition"
+    if (re.search(r"\b(?:gender|unisex|male|female|men or women|women or men|for men|for women|for a man|for a woman|for males|for females|for ladies|for gentlemen|for him or her)\b", q)
+            or (re.search(r"\b(?:men|women|man|woman|ladies|gentlemen)\b", q)
+                and re.search(r"\b(?:is|are|can|wear|suitable)\b", q))) and not re.search(r"\b(?:inspiration|inspired|similar|alternative|dupe)\b", q):
+        return "gender"
+    if re.search(r"\b(?:inspired by|inspired from|similar to|smells like|smell like|something like|anything like|perfume like|fragrance like|alternative to|dupe of|dupes of|equivalent to|version of)\s+(.+)", q):
+        target = extract_inspiration_target(q)
+        if target and not re.match(r"^(?:what|which|whom)\b", target):
+            return "inspired_products"
+    if re.search(r"\b(?:inspiration|inspo|inspired|based on|copy of)\b", q):
+        if re.search(r"\b(?:do you have|show me|find|looking for)\b", q) and "inspiration behind" not in q:
+            return "inspired_products"
+        return "inspiration"
+    return None
+
+
+def extract_inspiration_target(text):
+    q = tidy_phrase(text)
+    match = re.search(r"\b(?:inspired by|inspired from|similar to|smells like|smell like|something like|anything like|perfume like|fragrance like|alternative to|dupe of|dupes of|equivalent to|version of)\s+(.+)$", q)
+    if match:
+        return tidy_phrase(match.group(1))
+    match = re.search(r"\b(?:inspiration|inspired)\s+(?:perfumes?|fragrances?)\s+(?:for|of)\s+(.+)$", q)
+    return tidy_phrase(match.group(1)) if match else ""
+
+
+def unique_products(rows):
+    seen, result = set(), []
+    for row in rows:
+        key = product_key(row)
+        if key not in seen and safe_str(row.get("perfume_name", "")):
+            seen.add(key)
+            result.append(row)
+    return result
+
+
+def product_key(row):
+    return tuple(normalize_text(row.get(c, "")) for c in ("brand", "perfume_name", "ml"))
+
+
+def name_matches(phrase, value):
+    query, name = tidy_phrase(phrase), tidy_phrase(value)
+    if not query or not name:
+        return False
+    return f" {query} " in f" {name} "
+
+
+def named_products(text, df):
+    q = f" {tidy_phrase(text)} "
+    candidates = []
+    for _, row in df.iterrows():
+        name = tidy_phrase(row.get("perfume_name", ""))
+        if name and f" {name} " in q:
+            candidates.append((len(name), row))
+    if not candidates:
+        return []
+    longest = max(length for length, _ in candidates)
+    rows = unique_products([row for length, row in candidates if length == longest])
+    # A brand mentioned in the question can disambiguate duplicate names.
+    branded = [row for row in rows if f" {tidy_phrase(row.get('brand', ''))} " in q]
+    rows = branded or rows
+    sized = [row for row in rows if safe_str(row.get("ml", "")) and
+             name_matches(row.get("ml", ""), text)]
+    return sized or rows
+
+
+def exact_name_input(text, df):
+    q = tidy_phrase(text)
+    return any(
+        q == tidy_phrase(row.get(column, ""))
+        for _, row in df.iterrows()
+        for column in ("perfume_name", "inspiration")
+        if safe_str(row.get(column, ""))
+    )
+
+
+def session_state(update, context):
+    # Keep each group participant's context separate, and expire old selections.
+    user_id = update.effective_user.id if update.effective_user else 0
+    sessions = context.chat_data.setdefault("product_sessions", {})
+    now = time.time()
+    for key in list(sessions):
+        if now - sessions[key].get("updated_at", 0) > CONTEXT_SECONDS:
+            del sessions[key]
+    state = sessions.setdefault(user_id, {})
+    state["updated_at"] = now
+    return state
+
+
+def remember_products(state, rows):
+    state["last_products"] = [product_key(row) for row in unique_products(rows)]
+    state.pop("pending_faq", None)
+
+
+def previous_products(state, df):
+    keys = set(state.get("last_products", []))
+    return unique_products([row for _, row in df.iterrows() if product_key(row) in keys])
+
+
+def is_followup(text):
+    q = tidy_phrase(text)
+    if re.search(r"\b(?:this|that|it|its|these|those|above|last|previous)\b", q):
+        return True
+    return q in {
+        "gender", "gender please", "men or women", "male or female", "unisex",
+        "is this unisex", "what is the inspiration", "what s the inspiration",
+        "inspiration", "inspo", "scent family", "fragrance family",
+    }
+
+
+async def reply_faq(message, text):
+    await message.reply_text(text, parse_mode="HTML", disable_web_page_preview=True,
+                             reply_markup=ReplyKeyboardRemove())
+
+
+async def static_faq(message, intent):
+    answers = {
+        "family_definition": (
+            'A <b>scent family</b> describes a perfume’s overall smell, such as '
+            '<b>floral, woody, citrus or gourmand</b>. '
+            'Gourmand means sweet, dessert-like scents.'
+        ),
+        "stock": 'Please contact our sales team at <b>+971 56 508 7612</b> to confirm availability.',
+        "order": (
+            'You can order through our websites:\n\n'
+            '<b>Volaré:</b> <a href="https://www.volareperfumes.com">www.volareperfumes.com</a>\n'
+            '<b>Mamlakat, Ard Al Khaleej &amp; Sublime:</b> '
+            '<a href="https://www.mamlakat.com">www.mamlakat.com</a>'
+        ),
+        "payment": 'We accept advance payment by <b>bank transfer or card</b>.',
+        "stores": 'Find a store near you: <a href="https://www.mamlakat.com/pages/stores">View our stores</a>.',
+    }
+    if intent not in answers:
+        return False
+    await reply_faq(message, answers[intent])
+    return True
+
+
+async def answer_product_faq(message, intent, rows, state):
+    rows = unique_products(rows)
+    # Different sizes can share a single factual answer, if their data agree.
+    column = {"inspiration": "inspiration", "gender": "gender", "family": "scent_family"}.get(intent)
+    if len(rows) > 1 and column:
+        identities = {(normalize_text(r.get("brand", "")), normalize_text(r.get("perfume_name", ""))) for r in rows}
+        answers = {normalize_text(r.get(column, "")) for r in rows}
+        if len(identities) == 1 and len(answers) == 1:
+            rows = rows[:1]
+    # Never guess which product "this perfume" means after several results.
+    if len(rows) != 1:
+        state["pending_faq"] = intent
+        names = list(dict.fromkeys(safe_str(r.get("perfume_name", "")) for r in rows))
+        text = 'Which perfume do you mean? Please type its <b>name</b>'
+        if len(rows) > 1:
+            text += ', <b>brand</b> and <b>size</b>'
+        text += '.'
+        if names:
+            text += '\n\n' + '\n'.join(escape(n) for n in names[:MAX_RESULTS])
+        await reply_faq(message, text)
+        return
+    row = rows[0]
+    name = escape(safe_str(row.get("perfume_name", "")))
+    if intent == "inspiration":
+        value = safe_str(row.get("inspiration", ""))
+        text = (f'<b>{name}</b> is inspired by <b>{escape(value)}</b>.' if value else
+                f'The inspiration for <b>{name}</b> is not listed. Please contact <b>+971 56 508 7612</b>.')
+    elif intent == "gender":
+        value = safe_str(row.get("gender", ""))
+        gender = normalize_text(value)
+        descriptions = {
+            "men": "for men", "man": "for men", "male": "for men",
+            "women": "for women", "woman": "for women", "female": "for women",
+            "unisex": "unisex — suitable for everyone",
+        }
+        description = descriptions.get(gender, value)
+        text = (f'<b>{name}</b> is <b>{escape(description)}</b>.' if description else
+                f'The gender category for <b>{name}</b> is not listed. Please contact <b>+971 56 508 7612</b>.')
+    else:
+        value = safe_str(row.get("scent_family", ""))
+        text = (f'<b>{name}</b> belongs to the <b>{escape(value)}</b> scent family.' if value else
+                f'The scent family for <b>{name}</b> is not listed.')
+    await reply_faq(message, text)
+    remember_products(state, rows)
+
+
+async def send_product_results(message, rows, state):
+    remember_products(state, rows)
+    for row in rows:
+        blocks = build_detail_blocks(row)
+        caption = "\n".join(blocks)
+        short_caption = len(caption) <= 1000
+        sent_photo = False
+        for photo_url in split_photo_urls(row.get("photo_url", ""))[:3]:
+            try:
+                await message.reply_photo(
+                    photo=photo_url,
+                    caption=caption if short_caption and not sent_photo else "",
+                    parse_mode="HTML",
+                )
+                sent_photo = True
+            except Exception:
+                logger.warning("Could not send a product photo.", exc_info=True)
+        if not sent_photo or not short_caption:
+            await send_detail_text(message, blocks)
+
+
+async def dynamic_faq(update, text, intent, df, state):
+    message = update.message
+    if intent == "inspired_products":
+        target = extract_inspiration_target(text)
+        if not target:
+            state["pending_faq"] = intent
+            await reply_faq(message, 'Please type the <b>inspiration perfume name</b>, such as <b>Dior Sauvage</b>.')
+            return
+        rows = unique_products([row for _, row in df.iterrows()
+                                if name_matches(target, row.get("inspiration", ""))])[:MAX_RESULTS]
+        if not rows:
+            state.pop("pending_faq", None)
+            await reply_faq(message, 'No matching inspired perfumes were found. Please check the inspiration name and try again.')
+            return
+        await reply_faq(message, f'Our perfumes inspired by <b>{escape(target)}</b>:')
+        await send_product_results(message, rows, state)
+        return
+    rows = named_products(text, df)
+    if not rows and is_followup(text):
+        rows = previous_products(state, df)
+    await answer_product_faq(message, intent, rows, state)
+
 async def start_command(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ):
     if update.message:
+        state = session_state(update, context)
+        state.clear()
+        state["updated_at"] = time.time()
         await send_usage(update.message)
 
 
@@ -372,72 +630,54 @@ async def handle_message(
 ):
     if not update.message or not update.message.text:
         return
-
-    user_text = update.message.text.strip()
-
+    text = update.message.text.strip()
+    state = session_state(update, context)
+    intent = faq_intent(text)
     try:
-        df = get_data()
+        # General FAQs do not depend on the product sheet being online.
+        if intent in {"family_definition", "stock", "order", "payment", "stores"}:
+            if cached_df is None or not exact_name_input(text, cached_df):
+                state.pop("pending_faq", None)
+                await static_faq(update.message, intent)
+                return
 
-        if looks_like_sentence(user_text, df):
+        df = await asyncio.to_thread(get_data)
+        if exact_name_input(text, df):
+            intent = None
+
+        if intent in {"inspired_products", "inspiration", "gender", "family"}:
+            await dynamic_faq(update, text, intent, df, state)
+            return
+
+        pending = state.get("pending_faq")
+        if pending and not looks_like_sentence(text, df):
+            if pending == "inspired_products":
+                await dynamic_faq(update, "inspired by " + text, pending, df, state)
+            else:
+                rows = named_products(text, df)
+                if not rows:
+                    rows = unique_products([row for _, row in df.iterrows()
+                                            if name_matches(text, row.get("perfume_name", ""))])
+                await answer_product_faq(update.message, pending, rows, state)
+            return
+
+        if looks_like_sentence(text, df):
             await send_name_only_instruction(update.message)
             return
 
-        results = search_perfumes(user_text, df)
-
-        if not results:
-            await update.message.reply_text(
-                "<b>No matches found.</b>\n\n"
-                "Please type only our perfume name or the inspiration "
-                "perfume name, without a full sentence.\n\n"
-                "Examples: <b>Palm Chill</b> or <b>Dior Sauvage</b>.",
-
-                parse_mode="HTML",
-                reply_markup=ReplyKeyboardRemove(),
+        rows = search_perfumes(text, df)
+        if not rows:
+            await reply_faq(
+                update.message,
+                '<b>No matches found.</b>\n\nPlease type only our perfume name or '
+                'the inspiration perfume name. Examples: <b>Palm Chill</b> or <b>Dior Sauvage</b>.',
             )
             return
-
-        for row in results:
-            blocks = build_detail_blocks(row)
-            caption = "\n".join(blocks)
-
-            photo_urls = split_photo_urls(
-                row.get("photo_url", "")
-            )
-
-            short_caption = len(caption) <= 1000
-            sent_photo = False
-
-            for photo_url in photo_urls[:3]:
-                try:
-                    await update.message.reply_photo(
-                        photo=photo_url,
-                        caption=(
-                            caption
-                            if short_caption and not sent_photo
-                            else ""
-                        ),
-                        parse_mode="HTML",
-                    )
-                    sent_photo = True
-
-                except Exception:
-                    logger.warning(
-                        "Could not send a product photo.",
-                        exc_info=True,
-                    )
-
-            if not sent_photo or not short_caption:
-                await send_detail_text(
-                    update.message,
-                    blocks,
-                )
-
+        await send_product_results(update.message, rows, state)
     except Exception:
-        logger.exception("Error while handling product search.")
-
+        logger.exception("Error while handling product search or FAQ.")
         await update.message.reply_text(
-            "There was an error loading or sending product details. "
-            "Please try again.",
+            "There was an error loading or sending product details. Please try again.",
             reply_markup=ReplyKeyboardRemove(),
         )
 
