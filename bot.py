@@ -1,8 +1,3 @@
-**Replace all of `bot.py` with this code.** Use the code box’s **Copy** button so the ``` markers aren’t included.
-
-This adds example buttons, `/help`, the short welcome guide, and a helpful reply when nothing matches.
-
-```python
 import os
 import threading
 import logging
@@ -499,4 +494,3 @@ if __name__ == "__main__":
     ).start()
 
     main()
-```
