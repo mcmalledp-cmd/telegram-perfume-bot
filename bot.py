@@ -315,26 +315,18 @@ async def send_usage(message):
         "<b>Welcome to Mamlakat Product Bot ✦</b>\n"
         "Volaré / Mamlakat / Ard Al Khaleej / Sublime\n\n"
 
-        "🔎 <b>Search an inspiration perfume</b>\n"
-        "Type <b>Dior Sauvage</b>, for example, "
-        "to find our perfumes inspired by it.\n\n"
+        "🔎 Type <b>Dior Sauvage</b>, for example, "
+        "to see our inspired perfumes with photos, "
+        "fragrance notes and product details.\n\n"
 
-        "🌸 <b>Search our perfume</b>\n"
-        "Type <b>Palm Chill</b>, for example, "
-        "to see its photo, gender, size (ml), inspiration, "
-        "fragrance notes and scent family.\n\n"
+        "🌸 Type <b>our perfume name</b> to see its "
+        "photo, inspiration, notes, gender, size "
+        "and scent family.\n\n"
 
-        "✨ <b>Explore scents</b>\n"
-        "Try <b>Floral</b>, <b>Woody</b> or "
-        "<b>Gourmand</b> (sweet, dessert-like scents). "
-        "You can also search a note such as <b>vanilla</b>.\n\n"
+        "✨ Explore by scent: <b>Floral, Woody, "
+        "Gourmand</b> or <b>Vanilla</b>.\n\n"
 
-        "<b>Type a name or tap an example below to start.</b>\n"
-        "Use short search terms, such as "
-        "<b>Dior Sauvage</b>, rather than a full sentence.\n\n"
-
-        "Up to 10 matching products per search.\n"
-        "Send /help whenever you need this guide.",
+        "<b>Type your search or tap a button below.</b>",
 
         parse_mode="HTML",
         disable_web_page_preview=True,
@@ -381,7 +373,7 @@ async def handle_message(
                 "Try a shorter perfume name, an inspiration name, "
                 "a note such as <b>vanilla</b>, or a scent family "
                 "such as <b>Floral</b>.\n\n"
-                "You can also tap an example below or send /help.",
+                "You can also tap an example below.",
 
                 parse_mode="HTML",
                 reply_markup=search_keyboard(),
