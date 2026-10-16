@@ -8,7 +8,7 @@ from html import escape
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pandas as pd
-from telegram import Update, ReplyKeyboardMarkup
+from telegram import Update, ReplyKeyboardRemove
 from telegram.ext import (
     Application,
     MessageHandler,
@@ -34,22 +34,6 @@ logger = logging.getLogger(__name__)
 
 cached_df = None
 last_load_time = 0
-
-HELP_BUTTON = "❓ How to use"
-
-
-def search_keyboard():
-    return ReplyKeyboardMarkup(
-        [
-            ["Dior Sauvage", "Palm Chill"],
-            ["Floral", "Woody", "Gourmand"],
-            [HELP_BUTTON],
-        ],
-        resize_keyboard=True,
-        one_time_keyboard=False,
-        input_field_placeholder="Type a perfume, note or scent family",
-    )
-
 
 def safe_str(value) -> str:
     return str(value).strip() if value is not None else ""
@@ -310,29 +294,61 @@ def search_perfumes(user_text: str, df: pd.DataFrame):
     return unique_rows[:MAX_RESULTS]
 
 
+def looks_like_sentence(user_text: str, df: pd.DataFrame) -> bool:
+    """Recognize common requests without rejecting real multi-word names."""
+    query = normalize_text(user_text).replace("’", "'")
+    if not query:
+        return False
+
+    # Names such as "I Want Choo" and "Stronger With You" are valid.
+    # Check each name field separately, not combined notes or descriptions.
+    for column in ("perfume_name", "inspiration"):
+        if column in df.columns:
+            for value in df[column]:
+                known_name = normalize_text(value).replace("’", "'")
+                if known_name and query in known_name:
+                    return False
+
+    patterns = [
+        r"^(?:please|hi|hello|hey)\b",
+        r"^(?:can|could|would|will)\s+you\b",
+        r"^(?:do|did|does)\s+(?:you|this|it)\b",
+        r"^(?:i|we)\s+(?:want|need|would|am|are|like|have|love|prefer)\b",
+        r"^(?:i'm|we're|i'd|we'd)\b",
+        r"^(?:show|give|tell|find|recommend|suggest|send)\s+(?:me|us)\b",
+        r"^(?:what|which|where|how|why|who|is there|are there)\b",
+        r"^(?:looking|searching)\s+for\b",
+        r"\b(?:please|do you have|can you|could you)\b",
+        r"^(?:اريد|ابي|ابغى|ممكن|هل|عندكم|عندك|اعطني|بدي)(?:\s|$)",
+    ]
+    return any(re.search(pattern, query) for pattern in patterns)
+
+
+async def send_name_only_instruction(message):
+    await message.reply_text(
+        "Please type <b>only our perfume name</b> or "
+        "<b>the inspiration perfume name</b>, without a full sentence.\n\n"
+        "Examples: <b>Palm Chill</b> or <b>Dior Sauvage</b>.",
+        parse_mode="HTML",
+        reply_markup=ReplyKeyboardRemove(),
+    )
+
+
 async def send_usage(message):
     await message.reply_text(
         "<b>Welcome to Mamlakat Product Bot ✦</b>\n"
         "Volaré / Mamlakat / Ard Al Khaleej / Sublime\n\n"
-
-        "🔎 Type <b>Dior Sauvage</b>, for example, "
-        "to see our inspired perfumes with photos, "
-        "fragrance notes and product details.\n\n"
-
-        "🌸 Type <b>our perfume name</b> to see its "
-        "photo, inspiration, notes, gender, size "
-        "and scent family.\n\n"
-
-        "✨ Explore by scent: <b>Floral, Woody, "
-        "Gourmand</b> or <b>Vanilla</b>.\n\n"
-
-        "<b>Type your search or tap a button below.</b>",
-
+        "🔎 Type <b>Dior Sauvage</b>, for example, to find "
+        "<b>our perfumes inspired by it</b>.\n\n"
+        "🌸 Type <b>our perfume name</b>, such as "
+        "<b>Palm Chill</b>, to view its details.\n\n"
+        "Results include photos, fragrance notes, inspiration, "
+        "gender, size and scent family.\n\n"
+        "<b>Enter the perfume name only, without a full sentence.</b>",
         parse_mode="HTML",
         disable_web_page_preview=True,
-        reply_markup=search_keyboard(),
+        reply_markup=ReplyKeyboardRemove(),
     )
-
 
 async def start_command(
     update: Update,
@@ -359,24 +375,24 @@ async def handle_message(
 
     user_text = update.message.text.strip()
 
-    if user_text == HELP_BUTTON:
-        await send_usage(update.message)
-        return
-
     try:
         df = get_data()
+
+        if looks_like_sentence(user_text, df):
+            await send_name_only_instruction(update.message)
+            return
+
         results = search_perfumes(user_text, df)
 
         if not results:
             await update.message.reply_text(
                 "<b>No matches found.</b>\n\n"
-                "Try a shorter perfume name, an inspiration name, "
-                "a note such as <b>vanilla</b>, or a scent family "
-                "such as <b>Floral</b>.\n\n"
-                "You can also tap an example below.",
+                "Please type only our perfume name or the inspiration "
+                "perfume name, without a full sentence.\n\n"
+                "Examples: <b>Palm Chill</b> or <b>Dior Sauvage</b>.",
 
                 parse_mode="HTML",
-                reply_markup=search_keyboard(),
+                reply_markup=ReplyKeyboardRemove(),
             )
             return
 
@@ -422,7 +438,7 @@ async def handle_message(
         await update.message.reply_text(
             "There was an error loading or sending product details. "
             "Please try again.",
-            reply_markup=search_keyboard(),
+            reply_markup=ReplyKeyboardRemove(),
         )
 
 
