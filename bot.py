@@ -1,3 +1,8 @@
+**Replace all of `bot.py` with this code.** Use the code box’s **Copy** button so the ``` markers aren’t included.
+
+This adds example buttons, `/help`, the short welcome guide, and a helpful reply when nothing matches.
+
+```python
 import os
 import threading
 import logging
@@ -8,7 +13,7 @@ from html import escape
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pandas as pd
-from telegram import Update
+from telegram import Update, ReplyKeyboardMarkup
 from telegram.ext import (
     Application,
     MessageHandler,
@@ -35,15 +40,42 @@ logger = logging.getLogger(__name__)
 cached_df = None
 last_load_time = 0
 
+HELP_BUTTON = "❓ How to use"
+
+
+def search_keyboard():
+    return ReplyKeyboardMarkup(
+        [
+            ["Dior Sauvage", "Palm Chill"],
+            ["Floral", "Woody", "Gourmand"],
+            [HELP_BUTTON],
+        ],
+        resize_keyboard=True,
+        one_time_keyboard=False,
+        input_field_placeholder="Type a perfume, note or scent family",
+    )
+
+
+def safe_str(value) -> str:
+    return str(value).strip() if value is not None else ""
+
+
+def normalize_text(text: str) -> str:
+    text = unicodedata.normalize("NFKD", safe_str(text))
+
+    text = "".join(
+        character
+        for character in text
+        if not unicodedata.combining(character)
+    )
+
+    return re.sub(r"\s+", " ", text).strip().lower()
+
 
 def load_data_from_source() -> pd.DataFrame:
-    if SHEET_URL:
-        df = pd.read_csv(SHEET_URL, dtype=str)
-        logger.info("Loaded data from Google Sheet.")
-    else:
-        df = pd.read_csv(LOCAL_CSV_FILE, dtype=str)
-        logger.info("Loaded data from local CSV.")
+    source = SHEET_URL if SHEET_URL else LOCAL_CSV_FILE
 
+    df = pd.read_csv(source, dtype=str)
     df = df.fillna("")
 
     df.columns = [
@@ -57,6 +89,8 @@ def load_data_from_source() -> pd.DataFrame:
                 f"Missing required column: {column}"
             )
 
+    logger.info("Loaded %s product rows.", len(df))
+
     return df
 
 
@@ -69,7 +103,7 @@ def get_data() -> pd.DataFrame:
         try:
             cached_df = load_data_from_source()
             last_load_time = now
-            logger.info("Data cache refreshed.")
+            logger.info("Product cache refreshed.")
 
         except Exception:
             logger.exception("Failed to refresh product data.")
@@ -80,31 +114,16 @@ def get_data() -> pd.DataFrame:
     return cached_df
 
 
-def safe_str(value) -> str:
-    return str(value).strip() if value is not None else ""
-
-
-def normalize_text(text: str) -> str:
-    text = unicodedata.normalize(
-        "NFKD",
-        safe_str(text),
-    )
-
-    return "".join(
-        character
-        for character in text
-        if not unicodedata.combining(character)
-    ).lower()
-
-
-def instagram_for_brand(brand: str):
+def brand_links(brand: str):
     brand = normalize_text(brand)
 
     if "volare" in brand:
-        return (
-            "https://www.instagram.com/volare.perfumes",
-            "@volare.perfumes",
-        )
+        return {
+            "website_url": "https://www.volareperfumes.com",
+            "website_label": "www.volareperfumes.com",
+            "instagram_url": "https://www.instagram.com/volare.perfumes",
+            "instagram_label": "@volare.perfumes",
+        }
 
     if any(
         name in brand
@@ -114,10 +133,12 @@ def instagram_for_brand(brand: str):
             "sublime",
         )
     ):
-        return (
-            "https://www.instagram.com/mamlakatofficial/",
-            "@mamlakatofficial",
-        )
+        return {
+            "website_url": "https://www.mamlakat.com",
+            "website_label": "www.mamlakat.com",
+            "instagram_url": "https://www.instagram.com/mamlakatofficial/",
+            "instagram_label": "@mamlakatofficial",
+        }
 
     return None
 
@@ -127,7 +148,7 @@ def convert_google_drive_url(url: str) -> str:
 
     patterns = [
         r"drive\.google\.com/file/d/([^/]+)/",
-        r"id=([^&]+)",
+        r"drive\.google\.com/.*[?&]id=([^&]+)",
     ]
 
     for pattern in patterns:
@@ -164,6 +185,7 @@ def build_detail_blocks(row):
     fields = [
         ("Brand", "brand"),
         ("Perfume", "perfume_name"),
+        ("Inspiration", "inspiration"),
         ("Gender", "gender"),
         ("Size", "ml"),
         ("Top", "top"),
@@ -186,20 +208,21 @@ def build_detail_blocks(row):
 
             text = escape(value[offset:offset + 500])
 
-            blocks.append(
-                f"<b>{heading}:</b> {text}"
-            )
+            blocks.append(f"<b>{heading}:</b> {text}")
 
-    instagram = instagram_for_brand(
-        row.get("brand", "")
-    )
+    links = brand_links(row.get("brand", ""))
 
-    if instagram:
-        url, handle = instagram
+    if links:
+        blocks.append(
+            f'<b>Website:</b> '
+            f'<a href="{links["website_url"]}">'
+            f'{links["website_label"]}</a>'
+        )
 
         blocks.append(
             f'📸 <b>Instagram:</b> '
-            f'<a href="{url}">{handle}</a>'
+            f'<a href="{links["instagram_url"]}">'
+            f'{links["instagram_label"]}</a>'
         )
 
     return blocks
@@ -213,11 +236,7 @@ async def send_detail_text(message, blocks):
     chunk = ""
 
     for block in blocks:
-        candidate = (
-            f"{chunk}\n{block}"
-            if chunk
-            else block
-        )
+        candidate = f"{chunk}\n{block}" if chunk else block
 
         if len(candidate) > 3900 and chunk:
             await message.reply_text(
@@ -225,9 +244,7 @@ async def send_detail_text(message, blocks):
                 parse_mode="HTML",
                 disable_web_page_preview=True,
             )
-
             chunk = block
-
         else:
             chunk = candidate
 
@@ -265,6 +282,9 @@ def search_perfumes(user_text: str, df: pd.DataFrame):
             row.get("perfume_name", "")
         )
 
+        if not perfume_name:
+            continue
+
         searchable_text = " ".join(
             normalize_text(row.get(column, ""))
             for column in searchable_columns
@@ -272,7 +292,6 @@ def search_perfumes(user_text: str, df: pd.DataFrame):
 
         if query == perfume_name:
             exact_matches.append(row)
-
         elif query in searchable_text:
             partial_matches.append(row)
 
@@ -283,37 +302,65 @@ def search_perfumes(user_text: str, df: pd.DataFrame):
     unique_rows = []
 
     for row in partial_matches:
-        perfume_name = normalize_text(
-            row.get("perfume_name", "")
+        key = (
+            normalize_text(row.get("brand", "")),
+            normalize_text(row.get("perfume_name", "")),
+            normalize_text(row.get("ml", "")),
         )
 
-        if perfume_name not in seen:
-            seen.add(perfume_name)
+        if key not in seen:
+            seen.add(key)
             unique_rows.append(row)
 
     return unique_rows[:MAX_RESULTS]
+
+
+async def send_usage(message):
+    await message.reply_text(
+        "<b>Welcome to Mamlakat Product Bot ✦</b>\n"
+        "Volaré / Mamlakat / Ard Al Khaleej / Sublime\n\n"
+
+        "🔎 <b>Search an inspiration perfume</b>\n"
+        "Type <b>Dior Sauvage</b>, for example, "
+        "to find our perfumes inspired by it.\n\n"
+
+        "🌸 <b>Search our perfume</b>\n"
+        "Type <b>Palm Chill</b>, for example, "
+        "to see its photo, gender, size (ml), inspiration, "
+        "fragrance notes and scent family.\n\n"
+
+        "✨ <b>Explore scents</b>\n"
+        "Try <b>Floral</b>, <b>Woody</b> or "
+        "<b>Gourmand</b> (sweet, dessert-like scents). "
+        "You can also search a note such as <b>vanilla</b>.\n\n"
+
+        "<b>Type a name or tap an example below to start.</b>\n"
+        "Use short search terms, such as "
+        "<b>Dior Sauvage</b>, rather than a full sentence.\n\n"
+
+        "Up to 10 matching products per search.\n"
+        "Send /help whenever you need this guide.",
+
+        parse_mode="HTML",
+        disable_web_page_preview=True,
+        reply_markup=search_keyboard(),
+    )
 
 
 async def start_command(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ):
-    if not update.message:
-        return
+    if update.message:
+        await send_usage(update.message)
 
-    await update.message.reply_text(
-        "Welcome to Mamlakat Product Bot ✦\n"
-        "(Volaré / Mamlakat / Ard Al Khaleej / Sublime)\n\n"
-        "Search by perfume name, inspiration, "
-        "fragrance note or scent family.\n\n"
-        "Examples:\n"
-        "• Palm Chill\n"
-        "• Cotton Abyed\n"
-        "• Floral\n"
-        "• Gourmand\n\n"
-        "Each result includes fragrance details "
-        "and the brand's Instagram link."
-    )
+
+async def help_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+    if update.message:
+        await send_usage(update.message)
 
 
 async def handle_message(
@@ -323,17 +370,26 @@ async def handle_message(
     if not update.message or not update.message.text:
         return
 
+    user_text = update.message.text.strip()
+
+    if user_text == HELP_BUTTON:
+        await send_usage(update.message)
+        return
+
     try:
         df = get_data()
-
-        results = search_perfumes(
-            update.message.text.strip(),
-            df,
-        )
+        results = search_perfumes(user_text, df)
 
         if not results:
             await update.message.reply_text(
-                "Product not found."
+                "<b>No matches found.</b>\n\n"
+                "Try a shorter perfume name, an inspiration name, "
+                "a note such as <b>vanilla</b>, or a scent family "
+                "such as <b>Floral</b>.\n\n"
+                "You can also tap an example below or send /help.",
+
+                parse_mode="HTML",
+                reply_markup=search_keyboard(),
             )
             return
 
@@ -359,7 +415,6 @@ async def handle_message(
                         ),
                         parse_mode="HTML",
                     )
-
                     sent_photo = True
 
                 except Exception:
@@ -375,36 +430,25 @@ async def handle_message(
                 )
 
     except Exception:
-        logger.exception(
-            "Error while handling product search."
-        )
+        logger.exception("Error while handling product search.")
 
         await update.message.reply_text(
-            "There was an error loading or sending "
-            "product details. Please try again."
+            "There was an error loading or sending product details. "
+            "Please try again.",
+            reply_markup=search_keyboard(),
         )
 
 
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
-
-        self.send_header(
-            "Content-type",
-            "text/plain",
-        )
-
+        self.send_header("Content-type", "text/plain")
         self.end_headers()
         self.wfile.write(b"Bot is running")
 
     def do_HEAD(self):
         self.send_response(200)
-
-        self.send_header(
-            "Content-type",
-            "text/plain",
-        )
-
+        self.send_header("Content-type", "text/plain")
         self.end_headers()
 
     def log_message(self, format, *args):
@@ -412,20 +456,14 @@ class HealthHandler(BaseHTTPRequestHandler):
 
 
 def run_web_server():
-    port = int(
-        os.environ.get("PORT", 10000)
-    )
+    port = int(os.environ.get("PORT", 10000))
 
     server = HTTPServer(
         ("0.0.0.0", port),
         HealthHandler,
     )
 
-    logger.info(
-        "Health server running on port %s",
-        port,
-    )
-
+    logger.info("Health server running on port %s", port)
     server.serve_forever()
 
 
@@ -438,18 +476,10 @@ def main():
 
     get_data()
 
-    app = (
-        Application.builder()
-        .token(BOT_TOKEN)
-        .build()
-    )
+    app = Application.builder().token(BOT_TOKEN).build()
 
-    app.add_handler(
-        CommandHandler(
-            "start",
-            start_command,
-        )
-    )
+    app.add_handler(CommandHandler("start", start_command))
+    app.add_handler(CommandHandler("help", help_command))
 
     app.add_handler(
         MessageHandler(
@@ -459,10 +489,7 @@ def main():
     )
 
     logger.info("Bot is running...")
-
-    app.run_polling(
-        drop_pending_updates=True
-    )
+    app.run_polling(drop_pending_updates=True)
 
 
 if __name__ == "__main__":
@@ -472,3 +499,4 @@ if __name__ == "__main__":
     ).start()
 
     main()
+```
